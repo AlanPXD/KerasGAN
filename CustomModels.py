@@ -3,8 +3,8 @@ from tensorflow import keras
 from tensorflow.python.keras.engine import data_adapter
 
 
-class WGAN(keras.Model):
-    """A Wasserstein GAN Model, modified from Keras official example.
+class GAN(keras.Model):
+    """A GAN Model, modified from Keras official WGAN example.
 
     Args:
         keras (_type_): _description_
@@ -14,7 +14,7 @@ class WGAN(keras.Model):
         discriminator,
         generator,
         discriminator_extra_steps=3,
-        gp_weight=10.0,
+        gp_weight=10.0
     ):
         super().__init__()
         self.discriminator = discriminator
@@ -53,7 +53,6 @@ class WGAN(keras.Model):
         norm = tf.sqrt(tf.reduce_sum(tf.square(grads), axis=[1, 2, 3]))
         gp = tf.reduce_mean((norm - 1.0) ** 2)
         return gp
-        
 
     def train_step(self, data):
 
@@ -86,7 +85,7 @@ class WGAN(keras.Model):
                 discriminator_output_4fake = self.discriminator(fake_images, training=True)
                 # Get the logits for the real images
                 discriminator_output_4real = self.discriminator(real_images, training=True)
-                # Calculate the discriminator loss using the fake and real image logits
+                # Loss for the discriminator maximize (Them the sign is negative)
                 min_max_loss = -self.min_max_loss(discriminator_output_4real, discriminator_output_4fake)
                 # Calculate the gradient penalty
                 gp = self.gradient_penalty(batch_size, real_images, fake_images)
@@ -108,14 +107,20 @@ class WGAN(keras.Model):
             fake_images = self.generator(inputs, training=True)
             # Get the discriminator logits for fake images
             discriminator_output_4fake = self.discriminator(fake_images, training=True)
-            # Calculate the generator loss
-            min_max_loss = self.min_max_loss(discriminator_output_4real, discriminator_output_4fake)
+            
+            # Calculate the loss for the generator minimize
+            
+            min_max_loss = tf.reduce_mean(self.min_max_loss(discriminator_output_4real, discriminator_output_4fake))
             min_max_loss = tf.squeeze(min_max_loss)
             
-            other_losses_dict = {loss.__class__.__name__ : loss(real_images, fake_images) for loss in self.g_losses}
+            # Calculate the other generator losses
+        
+            other_losses_dict = {loss.__class__.__name__ : tf.reduce_mean(loss(real_images, fake_images)) for loss in self.g_losses}
             other_losses = list(other_losses_dict.values())
+            
             weighted_losses = [loss*weight for loss, weight in zip(other_losses, self.g_losses_weights)]
             weighted_losses_mean = tf.squeeze(tf.reduce_mean(weighted_losses, axis = 0))
+            
             total_loss = min_max_loss + weighted_losses_mean
             
         gen_gradient = tape.gradient(total_loss, self.generator.trainable_variables)
@@ -125,12 +130,77 @@ class WGAN(keras.Model):
             zip(gen_gradient, self.generator.trainable_variables)
         )
         
-        # Get the maximum value for the gradients.
-        #max_g_grad = tf.reduce_max([tf.reduce_max(grad) for grad in gen_gradient])
-        #max_d_grad = tf.reduce_max([tf.reduce_max(grad) for grad in d_gradient])
+        #generating losses and metrics dict
+        results = {self.min_max_loss.__name__: min_max_loss, "gp":gp}
+        results.update(other_losses_dict)
+        results.update({metric.__class__.__name__ : tf.reduce_mean(metric(real_images, fake_images)) for metric in self.g_metrics})
+        
+        return results
+    
+    def test_step(self, data):
+        """The logic for one evaluation step.
+
+        This method can be overridden to support custom evaluation logic.
+        This method is called by `Model.make_test_function`.
+
+        This function should contain the mathematical logic for one step of
+        evaluation.
+        This typically includes the forward pass, loss calculation, and metrics
+        updates.
+
+        Configuration details for *how* this logic is run (e.g. `tf.function` and
+        `tf.distribute.Strategy` settings), should be left to
+        `Model.make_test_function`, which can also be overridden.
+
+        Arguments:
+        data: A nested structure of `Tensor`s.
+
+        Returns:
+        A `dict` containing values that will be passed to
+        `tf.keras.callbacks.CallbackList.on_train_batch_end`. Typically, the
+        values of the `Model`'s metrics are returned.
+        """
+        data = data_adapter.expand_1d(data)
+        x, y, sample_weight = data_adapter.unpack_x_y_sample_weight(data)
+
+        batch_size = tf.shape(y)[0]
+
+        fake_images = self.generator(x)
+        
+        discriminator_output_4fake = self.discriminator(fake_images)
+        discriminator_output_4real = self.discriminator(y)
+      
+        gp = self.gradient_penalty(batch_size, y, fake_images)
+        min_max_loss =  tf.reduce_mean(self.min_max_loss(discriminator_output_4real, discriminator_output_4fake))
+        other_losses_dict = {loss.__class__.__name__ : tf.reduce_mean(loss(y, fake_images)) for loss in self.g_losses}
+        metrics = {metric.__class__.__name__ : tf.reduce_mean(metric(y, fake_images)) for metric in self.g_metrics}
         
         results = {self.min_max_loss.__name__: min_max_loss, "gp":gp}
         results.update(other_losses_dict)
-        results.update({metric.__class__.__name__ : metric(real_images, fake_images) for metric in self.g_metrics})
+        results.update(metrics)
         
         return results
+        
+    def save(self, folder_path):
+        self.generator.save(folder_path + f"/{self.generator.name}.tf")
+        self.discriminator.save(folder_path + f"/{self.discriminator.name}.tf")
+        
+    @property
+    def name(self):
+        """
+            The name of the gan is the name of the generator and discriminator
+        """
+        return f"{self.generator.name}_{self.discriminator.name}"
+        
+    def count_params(self):
+        """
+           Returns a dict containing the generator and discriminator parameters count
+        """
+        return {"gan": self.generator.count_params(), "discriminator": self.discriminator.count_params()}
+    
+    
+    def call(self, inputs, training=True, mask=None):
+        """
+            Call for the generator
+        """
+        return self.generator(inputs)
